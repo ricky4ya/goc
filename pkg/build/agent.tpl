@@ -23,6 +23,7 @@ import (
 	"net/rpc/jsonrpc"
 	"net/url"
 	"encoding/json"
+	"path/filepath"
 	"os"
 	"strings"
 	"strconv"
@@ -45,9 +46,12 @@ var (
 	token string
 	id string
 	cond = sync.NewCond(&sync.Mutex{})
-	commitID string = "{{.CommitID}}"
-	branch string = "{{.Branch}}"
-	register_extra = "{{.Extra}}"
+	projectID string = {{printf "%q" .ProjectID}}
+	projectPath string = {{printf "%q" .ProjectPath}}
+	projectName string = {{printf "%q" .ProjectName}}
+	commitID string = {{printf "%q" .CommitID}}
+	branch string = {{printf "%q" .Branch}}
+	register_extra string
 )
 
 func init() {
@@ -55,11 +59,6 @@ func init() {
 	host_env := os.Getenv("GOC_CUSTOM_HOST")
 	if host_env != "" {
 		host = host_env
-	}
-
-	// init extra information
-	if os.Getenv("GOC_REGISTER_EXTRA") != "" {
-		register_extra = os.Getenv("GOC_REGISTER_EXTRA")
 	}
 
 	var dialer = websocket.DefaultDialer
@@ -113,6 +112,26 @@ func init() {
 	}()
 }
 
+type agentIdentity struct {
+	Schema      string `json:"schema"`
+	ProjectID   string `json:"project_id"`
+	ProjectPath string `json:"project_path"`
+	ProjectName string `json:"project_name"`
+	Release     string `json:"release"`
+	DeployEnv   string `json:"deploy_env"`
+	CommitSHA   string `json:"commit_sha"`
+	CommitRef   string `json:"commit_ref,omitempty"`
+	Binary      string `json:"binary"`
+	Namespace   string `json:"namespace"`
+}
+
+func coverageDeployEnv() string {
+	if value := os.Getenv("ECHO_VERSION"); value != "" {
+		return value
+	}
+	return os.Getenv("ECHO_VESION")
+}
+
 // register
 func register (host string) {
 	for {
@@ -122,9 +141,26 @@ func register (host string) {
 			time.Sleep(waitDelay)
 			continue
 		}
-        app := os.Getenv("ECHO_APP_ID")
-        log.Printf("app: %v, commit: %v", app, commitID)
-        register_extra = fmt.Sprintf("%v_%v_%v", app, branch, commitID)
+		identity := agentIdentity{
+			Schema:      "echo.coverage.agent/v2",
+			ProjectID:   projectID,
+			ProjectPath: projectPath,
+			ProjectName: projectName,
+			Release:     os.Getenv("ECHO_APP_ID"),
+			DeployEnv:   coverageDeployEnv(),
+			CommitSHA:   commitID,
+			CommitRef:   branch,
+			Binary:      filepath.Base(os.Args[0]),
+			Namespace:   os.Getenv("NAMESPACE"),
+		}
+		extraJSON, err := json.Marshal(identity)
+		if err != nil {
+			log.Printf("[goc][Error] marshal agent identity: %v", err)
+			time.Sleep(waitDelay)
+			continue
+		}
+		register_extra = string(extraJSON)
+		log.Printf("[goc][Info] project: %v, release: %v, env: %v, commit: %v", projectPath, identity.Release, identity.DeployEnv, commitID)
 		// 注册，直接将元信息放在 ws 地址中
 		v := url.Values{}
 		v.Set("hostname", ps.hostname)

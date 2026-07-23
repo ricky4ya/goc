@@ -50,6 +50,22 @@ export GOC_CUSTOM_HOST="127.0.0.1:7779"
 ./agent
 ```
 
+### Echo Agent Identity v2
+
+执行 `goc inject` 时必须通过环境变量提供精确的 GitLab 项目标识：
+
+```bash
+export GOC_PROJECT_ID=632
+export GOC_PROJECT_PATH=qa/coverage_go
+export GOC_PROJECT_NAME=coverage_go
+export GOC_COMMIT_SHA=0123456789abcdef0123456789abcdef01234567
+# 可选，仅用于展示
+export GOC_COMMIT_REF=master
+```
+
+Agent 注册时会生成 `echo.coverage.agent/v2` JSON Extra。运行环境优先读取
+`ECHO_VERSION`，为空时兼容历史拼写 `ECHO_VESION`。
+
 #### 3. 日志优化
 
 带颜色日志，以及长时间操作时（例如 build, copy）会有转圈动画。

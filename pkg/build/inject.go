@@ -19,12 +19,48 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/ar0c/goc/v2/pkg/build/internal/tool"
 	"github.com/ar0c/goc/v2/pkg/build/internal/websocket"
 	"github.com/ar0c/goc/v2/pkg/log"
 )
+
+var fullCommitSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+type agentBuildIdentity struct {
+	ProjectID   string
+	ProjectPath string
+	ProjectName string
+	CommitSHA   string
+	CommitRef   string
+}
+
+func loadAgentBuildIdentity() (agentBuildIdentity, error) {
+	identity := agentBuildIdentity{
+		ProjectID:   strings.TrimSpace(os.Getenv("GOC_PROJECT_ID")),
+		ProjectPath: strings.TrimSpace(os.Getenv("GOC_PROJECT_PATH")),
+		ProjectName: strings.TrimSpace(os.Getenv("GOC_PROJECT_NAME")),
+		CommitSHA:   strings.TrimSpace(os.Getenv("GOC_COMMIT_SHA")),
+		CommitRef:   strings.TrimSpace(os.Getenv("GOC_COMMIT_REF")),
+	}
+	projectID, err := strconv.ParseUint(identity.ProjectID, 10, 64)
+	if err != nil || projectID == 0 {
+		return identity, fmt.Errorf("GOC_PROJECT_ID must be a positive numeric GitLab project id")
+	}
+	if identity.ProjectPath == "" || strings.HasPrefix(identity.ProjectPath, "/") || strings.HasSuffix(identity.ProjectPath, "/") {
+		return identity, fmt.Errorf("GOC_PROJECT_PATH must be a canonical GitLab project path")
+	}
+	if identity.ProjectName == "" || path.Base(identity.ProjectPath) != identity.ProjectName {
+		return identity, fmt.Errorf("GOC_PROJECT_NAME must equal the basename of GOC_PROJECT_PATH")
+	}
+	if !fullCommitSHA.MatchString(identity.CommitSHA) {
+		return identity, fmt.Errorf("GOC_COMMIT_SHA must be a full lowercase 40-character commit SHA")
+	}
+	return identity, nil
+}
 
 // Inject injects cover variables for all the .go files in the target directory
 func (b *Build) Inject() {
@@ -191,21 +227,20 @@ func (b *Build) injectGocAgent(where string, covers []*PackageCover) {
 	} else {
 		_coverMode = b.Mode
 	}
-	var commitID string
-	cmd := exec.Command("git", "rev-parse", "--short=8", "HEAD")
-	output, err := cmd.Output()
+	identity, err := loadAgentBuildIdentity()
 	if err != nil {
-		log.Errorf("git rev-parse Error: %v", err)
-	} else {
-		commitID = strings.TrimRight(string(output), "\n")
+		log.Fatalf("invalid coverage agent identity: %v", err)
 	}
-	var branch string
-	cmd = exec.Command("git", "branch", "--contains", commitID, "-r")
-	br, err := cmd.Output()
-	if err != nil {
-		log.Errorf("get git branch Error: %v", err)
-	} else {
-		branch = fmtBranch(br)
+	commitID := identity.CommitSHA
+	branch := identity.CommitRef
+	if branch == "" {
+		cmd := exec.Command("git", "branch", "--contains", commitID, "-r")
+		br, err := cmd.Output()
+		if err != nil {
+			log.Errorf("get git branch Error: %v", err)
+		} else {
+			branch = fmtBranch(br)
+		}
 	}
 	log.Infof("[goc][info] branch: %v --- commitID: %v", branch, commitID)
 	tmplData := struct {
@@ -216,6 +251,9 @@ func (b *Build) injectGocAgent(where string, covers []*PackageCover) {
 		Mode                     string
 		CommitID                 string
 		Branch                   string
+		ProjectID                string
+		ProjectPath              string
+		ProjectName              string
 		Extra                    string
 	}{
 		Covers:                   covers,
@@ -225,6 +263,9 @@ func (b *Build) injectGocAgent(where string, covers []*PackageCover) {
 		Mode:                     _coverMode,
 		Branch:                   branch,
 		CommitID:                 commitID,
+		ProjectID:                identity.ProjectID,
+		ProjectPath:              identity.ProjectPath,
+		ProjectName:              identity.ProjectName,
 		Extra:                    b.Extra,
 	}
 
