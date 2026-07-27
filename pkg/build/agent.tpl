@@ -52,6 +52,7 @@ var (
 	commitID string = {{printf "%q" .CommitID}}
 	branch string = {{printf "%q" .Branch}}
 	register_extra string
+	runtimeIdentityErrorOnce sync.Once
 )
 
 func init() {
@@ -125,11 +126,108 @@ type agentIdentity struct {
 	Namespace   string `json:"namespace"`
 }
 
+type coverageRuntimeIdentity struct {
+	Release   string
+	DeployEnv string
+	Binary    string
+	Namespace string
+}
+
+func firstNonEmptyEnv(keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func coverageRelease() string {
+	return firstNonEmptyEnv("GOC_RELEASE", "ECHO_APP_ID")
+}
+
 func coverageDeployEnv() string {
-	if value := os.Getenv("ECHO_VERSION"); value != "" {
+	return firstNonEmptyEnv("GOC_DEPLOY_ENV", "ECHO_VERSION", "ECHO_VESION")
+}
+
+func coverageNamespace() string {
+	if value := firstNonEmptyEnv("GOC_NAMESPACE", "NAMESPACE"); value != "" {
 		return value
 	}
-	return os.Getenv("ECHO_VESION")
+	value, err := ioutil.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(value))
+}
+
+func coverageBinary() string {
+	if executable, err := os.Executable(); err == nil {
+		if value := strings.TrimSpace(filepath.Base(executable)); value != "" && value != "." {
+			return value
+		}
+	}
+	if len(os.Args) == 0 {
+		return ""
+	}
+	value := strings.TrimSpace(filepath.Base(os.Args[0]))
+	if value == "." {
+		return ""
+	}
+	return value
+}
+
+func validCoverageRelease(value string) bool {
+	if len(value) == 0 || len(value) > 52 {
+		return false
+	}
+	for index, character := range []byte(value) {
+		isAlphaNumeric := character >= 'a' && character <= 'z' || character >= '0' && character <= '9'
+		if !isAlphaNumeric && (character != '-' || index == 0 || index == len(value)-1) {
+			return false
+		}
+	}
+	return true
+}
+
+func validCoverageDeployEnv(value string) bool {
+	return value == "default" ||
+		len(value) == len("test-a") &&
+			strings.HasPrefix(value, "test-") &&
+			value[len(value)-1] >= 'a' &&
+			value[len(value)-1] <= 'y'
+}
+
+func loadCoverageRuntimeIdentity() (coverageRuntimeIdentity, error) {
+	identity := coverageRuntimeIdentity{
+		Release:   coverageRelease(),
+		DeployEnv: coverageDeployEnv(),
+		Binary:    coverageBinary(),
+		Namespace: coverageNamespace(),
+	}
+	missing := make([]string, 0, 4)
+	if identity.Release == "" {
+		missing = append(missing, "release")
+	}
+	if identity.DeployEnv == "" {
+		missing = append(missing, "deploy_env")
+	}
+	if identity.Binary == "" {
+		missing = append(missing, "binary")
+	}
+	if identity.Namespace == "" {
+		missing = append(missing, "namespace")
+	}
+	if len(missing) > 0 {
+		return identity, fmt.Errorf("missing coverage runtime identity values: %s", strings.Join(missing, ", "))
+	}
+	if !validCoverageRelease(identity.Release) {
+		return identity, fmt.Errorf("invalid coverage runtime release %q", identity.Release)
+	}
+	if !validCoverageDeployEnv(identity.DeployEnv) {
+		return identity, fmt.Errorf("invalid coverage runtime deploy_env %q", identity.DeployEnv)
+	}
+	return identity, nil
 }
 
 // register
@@ -141,17 +239,25 @@ func register (host string) {
 			time.Sleep(waitDelay)
 			continue
 		}
+		runtimeIdentity, err := loadCoverageRuntimeIdentity()
+		if err != nil {
+			runtimeIdentityErrorOnce.Do(func() {
+				log.Printf("[goc][Error] coverage agent registration disabled: %v", err)
+			})
+			time.Sleep(waitDelay)
+			continue
+		}
 		identity := agentIdentity{
 			Schema:      "echo.coverage.agent/v2",
 			ProjectID:   projectID,
 			ProjectPath: projectPath,
 			ProjectName: projectName,
-			Release:     os.Getenv("ECHO_APP_ID"),
-			DeployEnv:   coverageDeployEnv(),
+			Release:     runtimeIdentity.Release,
+			DeployEnv:   runtimeIdentity.DeployEnv,
 			CommitSHA:   commitID,
 			CommitRef:   branch,
-			Binary:      filepath.Base(os.Args[0]),
-			Namespace:   os.Getenv("NAMESPACE"),
+			Binary:      runtimeIdentity.Binary,
+			Namespace:   runtimeIdentity.Namespace,
 		}
 		extraJSON, err := json.Marshal(identity)
 		if err != nil {
